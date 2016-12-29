@@ -125,7 +125,7 @@
 #pragma config IESO = OFF       // Internal/External Switchover Mode (Internal/External Switchover Mode is disabled)
 #pragma config FCMEN = OFF      // Fail-Safe Clock Monitor Enable (Fail-Safe Clock Monitor is disabled)
 #pragma config WRT = OFF        // Flash Memory Self-Write Protection (Write protection off)
-#pragma config PPS1WAY = ON     // Peripheral Pin Select one-way control (The PPSLOCK bit cannot be cleared once it is set by software)
+#pragma config PPS1WAY = OFF    // Peripheral Pin Select one-way control (The PPSLOCK bit cannot be cleared once it is set by software)
 #pragma config ZCDDIS = ON      // Zero-cross detect disable (Zero-cross detect circuit is disabled at POR)
 #pragma config PLLEN = ON       // Phase Lock Loop enable (4x PLL is always enabled)
 #pragma config STVREN = ON      // Stack Overflow/Underflow Reset Enable (Stack Overflow or Underflow will cause a Reset)
@@ -149,16 +149,28 @@
 volatile uint8_t tick=0;            // Incremented by IRQ at 0.1s rate
 volatile uint8_t button=0xFF;
 uint8_t pattern=0x18;
+uint8_t dispbuf[8];
+uint8_t enc=0;
 
-void ShiftOut(uint8_t v) {
-    for (uint8_t i=0; i<8; i++) {
-        if (v&1) LATC|=SHIFT_DATA_c; else LATC&=~SHIFT_DATA_c;
-        v/=2;
-        LATC|=SHIFT_CLOCK_c;
-        NOP();
-        LATC&=~SHIFT_CLOCK_c;
-    }
+//
+//
+//
+uint8_t ShiftOut(uint8_t v) {
+    SSP1BUF =  v;
+    while (!SSP1STATbits.BF);
+    v=SSP1BUF;
+    SSP1STATbits.BF = 0; 
+
+//    for (uint8_t i=0; i<8; i++) {
+//        if (v&1) LATC|=SHIFT_DATA_c; else LATC&=~SHIFT_DATA_c;
+//        v/=2;
+//        LATC|=SHIFT_CLOCK_c;
+//        NOP();
+//        LATC&=~SHIFT_CLOCK_c;
+//    }
+    return v;
 }
+
 
 
 
@@ -181,11 +193,65 @@ void main() {
     ANSELC=0;
     WPUA=0xFF;              // Turn on all pullups
     WPUC=0xFF;	
+
     TRISA=~(SHIFT_LATCH_a); // Set output mode
     TRISC=~(SHIFT_DATA_c|SHIFT_CLOCK_c);
-    LATA&=~SHIFT_LATCH_a;   // Low LATCH
-    LATC&=~SHIFT_CLOCK_c;   // Low CLOCK
+        
+    RC4PPSbits.RC4PPS = 0b10010;    // SPI.SDO -> RC4
+    RC5PPSbits.RC5PPS = 0b10000;    // SPI.SCK -> RC5
+
+//In MPASM Assembly format CLC1OUT Pin is connected to RA5
+//Banksel RA5PPS     ; go to bank with RA5PPS registers
+//movlw 0x04          ; load value for CLC1OUT
+//movwf RA5PPS      ; to RA5PPS register
+
+    SSP1STAT = 0b01000000;
+    SSP1CON1 = 0b00000010;
+    SSP1CON2 = 0b00000000;
+    SSP1CON3 = 0b00000000;
     
+    
+    SSP1STAT = 0b01000000;
+    //           |||||||+-- BF    Buffer Full Status  
+    //           ||||||+--- UA    -
+    //           |||||+---- R/-W  -
+    //           ||||+----- S     -
+    //           |||+------ P     -
+    //           ||+------- D/-A  -
+    //           |+-------- CKE   SPI Clock Edge Select
+    //           +--------- SMP   SPI Data Input Sample
+    
+    SSP1CON1 = 0b00000010;
+    //           |||||||+-- SSPM0 Synchronous Serial Port Mode Selec
+    //           ||||||+--- SSPM1
+    //           |||||+---- SSPM2
+    //           ||||+----- SSPM3
+    //           |||+------ CKP    Clock Polarity Select
+    //           ||+------- SSPEN  Synchronous Serial Port Enable
+    //           |+-------- SSPOV  Receive Overflow Indicator
+    //           +--------- WCOL   Write Collision Detect
+
+    SSP1CON2 = 0b00000000;
+    //           |||||||+-- SEN
+    //           ||||||+--- RSEN
+    //           |||||+---- PEN
+    //           ||||+----- RCEN
+    //           |||+------ ACKEN
+    //           ||+------- ACKDT
+    //           |+-------- ACKSTAT
+    //           +--------- GCEN
+
+    SSP1CON3 = 0b00000000;
+    //           |||||||+-- DHEN
+    //           ||||||+--- AHEN
+    //           |||||+---- SBCDE
+    //           ||||+----- SDAHT
+    //           |||+------ BOEN   Buffer Overwrite Enable
+    //           ||+------- SCIE
+    //           |+-------- PCIE
+    //           +--------- ACKTIM
+    SSP1CON1bits.SSPEN = 1;
+//        
   //  
   //   Setup Timer0 to generate interrupts at about 488 Hz for refreshing
   //   the displays at a relatively flicker-free 61 Hz.
@@ -193,13 +259,38 @@ void main() {
   //     fOsc/4      Prescale     8bit counter   8 displays 
   //   32000000/4 -> 8000000/64 -> 125000/256 -> 488/8 -> 61 Hz Refresh 
   //  
-  OPTION_REG=0x00 | T0_DIV64;   // Wpu enabled, Prescale T0 from Fosc/4 with 64 
-  INTCONbits.T0IE=1;            // Enable interrupt on TMR0 overflow
-  INTCONbits.GIE=1;             // Global interrupt enable
-  uint8_t tic=0;
 
+//  OPTION_REG=0x00 | T0_DIV64;   // Wpu enabled, Prescale T0 from Fosc/4 with 64 
+    OPTION_REG = 0b00000101;
+    //           |||||||+-- PS0    Prescaler Rate Selec
+    //           ||||||+--- PS1
+    //           |||||+---- PS2
+    //           ||||+----- PSA    Prescaler Assignment
+    //           |||+------ TMR0SE Timer0 Source Edge Select
+    //           ||+------- TMR0CS Timer0 Clock Source Select
+    //           |+-------- INTEDG Interrupt Edge Select
+    //           +--------- WPUEN  Weak Pull-Up Enable
+
+
+//  INTCONbits.T0IE=1;            // Enable interrupt on TMR0 overflow
+//  INTCONbits.GIE=1;             // Global interrupt enable
+    INTCON = 0b10100000;
+    //         |||||||+-- IOCIF  Interrupt-on-Change Interrupt Flag
+    //         ||||||+--- INTF   INT External Interrupt Flag
+    //         |||||+---- TMR0IF Timer0 Overflow Interrupt Flag
+    //         ||||+----- IOCIE  Interrupt-on-Change Enable
+    //         |||+------ INTE   INT External Interrupt Enable
+    //         ||+------- TMR0IE Timer0 Overflow Interrupt Enable
+    //         |+-------- PEIE   Peripheral Interrupt Enable
+    //         +--------- GIE    Global Interrupt Enable
+
+
+  for (uint8_t i=0; i<8; i++) dispbuf[i]=10;
   for (;;) {
-//      tic=tick; while (tic==tick){};
+      if (button!=0xFF) {
+          dispbuf[button]=enc/4;
+          button=0xFF;
+      }
   }
 }
 
@@ -208,7 +299,7 @@ void main() {
 // Interrupt handler. 
 //
 void interrupt ISR(void) {
-    static uint8_t disp=0;          // Index into the current display
+    static uint8_t dispno=0;        // Index into the current display
     static uint8_t lastButton=0x01; //
     static uint16_t localTick=0;    // Internal counter keeping track of the 0.1s tick
 
@@ -221,10 +312,16 @@ void interrupt ISR(void) {
         }
     }
 
-    uint8_t ch=39;
+    static int8_t enc_states[] = {0,-1,1,0,1,0,0,-1,-1,0,0,1,0,1,-1,0};
+    static uint8_t old_AB = 0;
+    old_AB <<= 2;                   //remember previous state
+    old_AB |= ( (((~PORTC) & 0b00000110) >> 1));  //add current state
+    uint8_t encDiff=enc_states[( old_AB & 0x0f )];
+    enc += encDiff;
     
+    uint8_t ch=dispbuf[dispno];
     uint8_t u=ch/8;
-    uint8_t b=1<<(ch&7);
+    uint8_t b=1<<(7-(ch&7));
     uint8_t v;
     
     v=0; if (u==0) v=b;             // Shiftout data for the five '595
@@ -238,26 +335,19 @@ void interrupt ISR(void) {
     v=0; if (u==4) v=b;
     ShiftOut(v);
     
-    ShiftOut(~((1<<disp)));         // Select the current display
+    ShiftOut(~((1<<dispno)));       // Select the current display
     
     NOP();
     LATA|=SHIFT_LATCH_a;            // Now latch data in all six '595
     NOP();
     LATA&=~SHIFT_LATCH_a;
 
-    
-    
-    //    ShiftOut(~((1<<disp)&pattern));
-
     if (!(PORTC&BUTTON_c)) { //pressed
-        lastButton++;
-//        lastButton|=(1<<disp);
-    } else {
-//        lastButton&=~(1<<disp);
+        button=dispno;
     }
-    if (disp++==8) {    // All digits refreshed, all button read
-        disp=0;          
-        pattern=lastButton;
+ 
+    if (dispno++==8) {    // All digits refreshed, all button read
+        dispno=0;          
     }
 
 }  
