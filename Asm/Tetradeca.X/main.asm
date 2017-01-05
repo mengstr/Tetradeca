@@ -11,13 +11,13 @@
 ; This project is an entry for the Hackaday 1kB Competition:
 ; hackaday.io/contest/18215-the-1kb-challenge    
 ; The size of the code and data tables are limited to 1024 bytes in total. 
-; Since the PIC16-series is a 14 bit code architecture so the 1024 bytes only
-; allows for 1024*8/14=585 "words"
+; Since the PIC16-series have a 14 bit code architecture so the 1024 bytes 
+; only allows for 1024*8/14=585 "words"
 ;
 ; Game ideas:
-;  * CRACK  Four letter word Mastermind game
+;  * CRACK  Four letter word Mastermind
 ;  * TONES  Eight-button Simon
-;  * ZEONE  Decimal-to-Binary conversion game
+;  * ZEONE  Decimal-to-Binary conversion
 ;  * SORTS  Sort-the-letters
 ;
 ; Credits and acknowledgements - I've used code from the sources below. I
@@ -43,10 +43,6 @@
     __CONFIG _CONFIG1, _FOSC_INTOSC & _WDTE_OFF & _PWRTE_OFF & _MCLRE_ON & _CP_OFF & _BOREN_OFF & _CLKOUTEN_OFF & _IESO_OFF & _FCMEN_OFF
     __CONFIG _CONFIG2, _WRT_OFF & _PPS1WAY_OFF & _ZCDDIS_ON & _PLLEN_ON & _STVREN_ON & _BORV_LO & _LPBOR_OFF & _LVP_ON
 
-#define CRACK   1 
-#define TONES   1
-#define ZEONE   1
-#define SORTS   1
 
 ;
 ;  A0 in  ICSPDAT               16F1705                 '595
@@ -109,7 +105,9 @@ encoder     res 1   ; ISR Set to negatives or positives, must be 0'd by user
 p           res 1   ; Generic p(ointer) variable
 game        res 1   ; The select game number
 cnt         res 1
-round       res 1         
+round       res 1
+decr16ms    res 1   ; ISR decrements at 16ms rate
+
 ;*******************************************************************************
 ; Variables in individual bank memories
 ;*******************************************************************************
@@ -134,23 +132,35 @@ tmp         res 1       ; Temporary variable for random number generation
 ;-----------------------
 bank2 UDATA 2*0x80+0x20 ; Bank 2 LAT/CMx/DAC
 ;-----------------------
-seconds     res 1
+seconds     res 1       ; ISR Counts up at 1 Hz
+iSec10      res 1       ; ISR used for count 10 ten before seconds+1 
 iCnt        res 1       ; ISR
 iCh         res 1       ; ISR
 iTick49     res 1       ; ISR Counts down from 49 to 0 keeping track of 100ms 
 iDispno     res 1       ; ISR The number of the current display 0..7
-dly1        res 1
-dly2        res 1
-dly3        res 1
 iButton     res 1       ; ISR Collects buttons during full display scan
 
 ;-----------------------
 bank3 UDATA 3*0x80+0x20 ; Bank3 ANSEL/PM/RC1/TX1
 ;-----------------------
 guesses     res 4*20    ; Up to 20 guesses of 4 letters each
-        
 
-    
+     
+; Defines for compile #ifdef's     
+#define CRACK   0 
+#define TONES   1
+#define ZEONE   1
+#define SORTS   1
+
+; Constants
+#define DELAYFACTOR 16          ; The decrement tick is at 16ms rate
+#define CHAROFFSET  54          ; @..Z must be offsetted to display correcly
+#define SPACE       10
+#define MINUS       37          ; Our "ascii" value for -
+#define PLUS        38          ; Our "ascii" value for +
+#define EQUAL       39          ; Out "ascii" value for =
+
+; Hardware-related constants
 #define ENCBUTTON   PORTA,2
 #define ENCA        PORTC,1          
 #define ENCB        PORTC,2          
@@ -179,42 +189,95 @@ GameNames:
     incf    p
     movfw   p
     brw
-#if CRACK
-    dt 'C'-54,'R'-54,'A'-54,'C'-54,'K'-54 ; Four letter word Mastermind game
+#if CRACK               ; Four letter word Mastermind game
+    dt 'C'-CHAROFFSET
+    dt 'R'-CHAROFFSET
+    dt 'A'-CHAROFFSET
+    dt 'C'-CHAROFFSET
+    dt 'K'-CHAROFFSET 
 #endif
-#if TONES
-    dt 'T'-54,'O'-54,'N'-54,'E'-54,'S'-54 ; Eight-button Simon
+#if TONES               ; Eight-button Simon
+    dt 'T'-CHAROFFSET
+    dt 'O'-CHAROFFSET
+    dt 'N'-CHAROFFSET
+    dt 'E'-CHAROFFSET
+    dt 'S'-CHAROFFSET
 #endif
-#if ZEONE
-    dt 'Z'-54,'E'-54,'O'-54,'N'-54,'E'-54 ; Dec/Hex-to-Binary conversion game
+#if ZEONE               ; Dec/Hex-to-Binary conversion game
+    dt 'Z'-CHAROFFSET
+    dt 'E'-CHAROFFSET
+    dt 'O'-CHAROFFSET
+    dt 'N'-CHAROFFSET
+    dt 'E'-CHAROFFSET 
 #endif
-#if SORTS
-    dt 'S'-54,'O'-54,'R'-54,'T'-54,'S'-54 ; Sort-the-letters
+#if SORTS               ; Sort-the-letters
+    dt 'S'-CHAROFFSET
+    dt 'O'-CHAROFFSET
+    dt 'R'-CHAROFFSET
+    dt 'T'-CHAROFFSET
+    dt 'S'-CHAROFFSET 
 #endif
 
-
+;****************************************************************************
+; Convert a bit number (0..7) to a mask value
+;   Input: WREG
+;   Destroys:  WREG
+;   Banksel:  
+;****************************************************************************
 BitToMask:
     brw
     dt  1,2,4,8,16,32,64,128
     
- 
+;****************************************************************************
+; Pulses the shiftregister clock signal low-high-low that will sample the
+; current value of the data pin and shift all the existing bit one step
+;   Input:     <none>
+;   Destroys:  <none>
+;   Banksel:   <none> But assumes bank 2 is already selected
+;****************************************************************************
+Pulse595Clock:
+    bsf     CLOCK595    ;2; Toggle SHIFT_CLOCK
+    nop
+    bcf     CLOCK595    ;2;
+    return
+
+;****************************************************************************
+; Pulses the shiftregister latch signal low-high-low that will cause the
+; previosly sampled/shifted bits to appear at the output pins
+;   Input:     <none>
+;   Destroys:  <none>
+;   Banksel:   <none> But assumes bank 2 is already selected
+;****************************************************************************
+Pulse595Latch:
+    bsf     LATCH595    ;2; Toggle the LATCH pin now when all shift registers
+    nop
+    bcf     LATCH595    ;2; 
+    return
+
 ;*******************************************************************************
 ; INTERRUPT CODE
 ;   Keeps track of the 0.1 second time ticker 
-;   Shifts out the SPI data to the display shift registers
 ;   Reads the buttons
+;   Pre-clears the display shift-registers to avoid ghosting
+;   Shifts out the new SPI data to the display shift registers
 ;   Reads the quadrature encoder
 ;*******************************************************************************
 Timer0Interrupt:
     bcf     INTCON,T0IF ;c; Clear the timer interrupt flag        
 
-; Keep track of time
+; Keep track of times
     banksel iTick49
     decfsz  iTick49     ;2; 49 ticks are 100.35ms, decrement and
     goto    not100ms    ; check if this counter reached 0, then...
+    ; Here we have reached a 100ms point in time
     movlw   49          ; ...restart count from 49
     movwf   iTick49     ;2;
-    incf    tick        ;c;  And increment the 0.1s time keeper
+    incf    tick        ;c;  And increment the resettable 0.1s time keeper
+    decfsz  iSec10      ;2; Also update the count-to-seconds counter
+    goto    not100ms    ;   No more here is not reached 0
+    movlw   10          ;   We have counted a full second, start over from 10
+    movwf   iSec10      ;2;
+    incf    seconds     ;2; Increment the game-time/score keeper
 not100ms
 
 ; Update display pointer variables to point to next display
@@ -228,9 +291,27 @@ not100ms
     movwf   button      ;c; to the global, and clear the internal
     movlw   0xff        ;   in preparation for the next scans
     movwf   iButton     ;2;
+    decf    decr16ms    ;c; Handle down counter here to keep code short
 NoButtonUpdate
 
-; Send out data for the currently active display
+; The P-MOSFETs that are connected to the commons of the displays
+; takes so long to turn off that a faint shadow of the previous display
+; are visible.
+KillDisplay
+    movlw   D'48'       ;  48 bits of segment+display data 
+    movwf   iCnt        ;2;
+KD1    
+    bcf     DATA595     ;2; The first 40 bits should be low,
+    movfw   iCnt        ;   
+    sublw   8           ;   and the last 8 bits should be high.
+    btfsc   STATUS,C    
+    bsf     DATA595
+    call    Pulse595Clock ; Toggle the clock line
+    decfsz  iCnt        ;2; Done all 48 bits yet?
+    goto    KD1
+    call    Pulse595Latch  ; Yes, latch the data onto the ports
+    
+; Now, send out the new real data for the currently active display
     movfw   iDispno     ;2;
     addlw   LOW(dispbuf) ;c; Index into the dispbuf
     movwf   FSR1L       ;c; and get the character to display
@@ -245,35 +326,24 @@ l40b
     bsf     DATA595     ;2; Set SHIFT_DATA high if c-- is zero
     decfsz  iCh         ;2;  
     bcf     DATA595     ;2; 
-    nop
-    bsf     CLOCK595    ;2; Toggle SHIFT_CLOCK
-    nop
-    bcf     CLOCK595    ;2;
+    call    Pulse595Clock
     decfsz  iCnt        ;2;
     goto    l40b
     
-;    banksel iDispno
     movfw   iDispno     ;2;
-;    banksel LATC
     movwf   iCh         ;2;
     incf    iCh         ;2;
+
     movlw   D'8'        ;   8 bits of segment data 
     movwf   iCnt        ;2;
 l8  
     bcf     DATA595     ;2; Set SHIFT_DATA low if iCh-- is zero
     decfsz  iCh         ;2;  
     bsf     DATA595     ;2;
-    nop
-    bsf     CLOCK595    ;2; Toggle SHIFT_CLOCK
-    nop
-    bcf     CLOCK595    ;2;
+    call    Pulse595Clock
     decfsz  iCnt        ;2;
     goto    l8
-
-    bsf     LATCH595    ;2; Toggle the LATCH pin now when all shift registers
-    nop
-    bcf     LATCH595    ;2; 
-
+    call    Pulse595Latch
 
 ; Read and analyze rotary encoder
     banksel PORTC
@@ -371,13 +441,16 @@ Start:
     
 ; The chip is setup correctly now, so let the user use
 ; the knob to select one of the four available games
+Main:
+    clrf    encoder     ;c; Prevent random encoder glitch after games
 MainLoop:
     andlw   3           ;   Make sure game is in range 0..3
     movwf   game        ;c;
     
-    call    ClearDisplay;   Show the name of the selection
-    call    ShowGameName
-    call    Delay10ms   ;   Delay for a bit to reduce flickering
+    call    ClearDisplay     ; Show the name of the selection
+    call    ShowGameName    
+    movlw   100/DELAYFACTOR ;Delay for a bit to reduce flicker
+    call    DelayX16
     
     banksel PORTC
     btfss   ENCBUTTON   ;0; Did user click the button?
@@ -390,13 +463,15 @@ MainLoop:
     goto     MainLoop
 
 GameSelected:
-    movlw   50           ;   Flash the selected game name for a while
+    movlw   10           ;   Flash the selected game name for a while
     movwf   cnt         ;c;
 GS1
     call    ShowGameName
-    call    Delay10ms   
+    movlw   100/DELAYFACTOR
+    call    DelayX16
     call    ClearDisplay
-    call    Delay10ms   
+    movlw   100/DELAYFACTOR
+    call    DelayX16
     decfsz  cnt         ;c;
     goto    GS1
     
@@ -427,24 +502,78 @@ GameCrack:
 ;****************************************************************************
 #if TONES
 GameTones:
+    movlw   39
+    call    ClearDisplayW
+    
+    movlw   LOW(guesses);   Point Index to array of tones
+    movwf   FSR0L       ;c;
+    movlw   HIGH(guesses)
+    movwf   FSR0H       ;c;
+    movlw   20          ;   20 array entries to populate
+    movwf   cnt         ;c;
+GTgenerate
+    call    Random      ;   Generate random number 0..7
+    banksel rndH        
+    movfw   rndH        ;1;
+    andlw   7
+    movwf   INDF0       ;c; Store in array
+    incf    FSR0L
+    decfsz  cnt         ;c;
+    goto    GTgenerate
+
+GTnewGame    
+    movlw   1
+    movwf   round
+GTshowSequence
+    clrf    p           ;c; Position in array to show
+GTshowLoop
+    call    ClearDisplay
+    movlw   HIGH(guesses)
+    movwf   FSR0H       ;c;
+    movlw   LOW(guesses);   Point Index to array of tones
+    addwf   p,W
+    movwf   FSR0L       ;c;
+    movfw   INDF0       ;  Get  tones[p]
+    movwf   cnt         ;  Tuck tone away in cnt while preparing new index
+    addlw   LOW(dispbuf)
+    movwf   FSR0L       ;c;
+    movlw   HIGH(dispbuf)
+    movwf   FSR0H       ;c;
+    movfw   cnt
+    addlw   11
+    movwf   INDF0
+    movlw   800/DELAYFACTOR ; Delay for 800 ms while showing the current tone
+    call    DelayX16
+    call    ClearDisplay
+    incf    p
+    movfw   p
+    subwf   round,W
+    btfss   STATUS, Z
+    goto    GTshowLoop
+    movwf   4000/DELAYFACTOR  ; At end of sequence delay for 4 seconds
+    incf    round
+    goto    GTshowSequence
 #endif
     
 ;****************************************************************************
 ; ZEONE  Decimal-to-Binary conversion game
+; The Score is based on total number of seconds used to pass all 10 rounds
 ;****************************************************************************
 #if ZEONE
 
 ZeOneLength:
     brw
-    dt  2,2,3,3,3,4,4,4,5,5
+    dt  1,2,3,4,5,6,7,7
 
 GameZeOne:
+    call    ClearSeconds;   Used as the total score
     clrf    round       ;c; Start at round 0
 ZeOneRoundLoop:
-    movlw   10          ;   Check if we done all 10 rounds
+    movlw   8           ;   Check if we done all 10 rounds
     xorwf   round,W     ;c
     btfsc   STATUS,Z
-    goto    ZeOneShowScore 
+    goto    ShowScore   ;   We're done. Show score and exit
+    
     movfw   round       ;c; Fetch the round length
     incf    round       ;c; And already now increment to next round
     call    ZeOneLength
@@ -521,9 +650,8 @@ WaitKeyOrRotate
     movfw   bin
     call    Bin8toAscii
 
-    clrf    tick            ;c; Delay for 3 seconds
-    btfss   tick,5
-    goto    $-1
+    movlw   3000/DELAYFACTOR ; Delay for 3 seconds as punishment
+    call    DelayX16
 
     goto    ZeOneShowBits
 
@@ -531,27 +659,50 @@ ZeOneCorrect
     call    PlayCorrect
     goto    ZeOneRoundLoop
 
-ZeOneShowScore
-    goto    MainLoop
+#endif
     
-    #endif
-
+    
+ShowScore;
+    call    ClearDisplay
+    banksel  seconds
+    movfw   seconds     ;2;
+    call    Bin8toAscii
+    call    CopyDisp3FirstTo3Last
+    movlw   'S'-CHAROFFSET
+    movwf   dispbuf+0
+    movlw   'C'-CHAROFFSET
+    movwf   dispbuf+1
+    movlw   'R'-CHAROFFSET
+    movwf   dispbuf+2
+    movlw   'E'-CHAROFFSET
+    movwf   dispbuf+3
+    call    WaitKeyPress
+    goto    Main
+    
+    
+    
+;****************************************************************************
+;****************************************************************************
 PlayCorrect:
-    movlw   38          ;   Show +++ for Correct
+    movlw   PLUS          ;   Show +++ for Correct
     goto    PlayFail+1
+;****************************************************************************
+;****************************************************************************
 PlayFail:
-    movlw   37          ;   Show --- for Fail
+    movlw   MINUS          ;   Show --- for Fail
     call    ClearDisplayW
-    clrf    tick        ;c; Delay for 1.5 seconds
-    btfss   tick,4
-    goto    $-1
-    return
+    movlw   1500/DELAYFACTOR ; Delay for 1.5 seconds as punishment
+    goto    DelayX16      ; DelayX16 will do the return for us
 
 ;****************************************************************************
-; SORTS  Sort-the-letters
+; SORTS  Sort-the-letters reversed
 ;****************************************************************************
 #if SORTS
 GameSorts:
+    call    ClearSeconds;   Used as the total score
+    movlw   5           ;   One game is 5 rounds
+    movwf   round       ;c;
+GSRoundLoop:
     call    ClearDisplay
     movlw   LOW(dispbuf);   Point Index to dispbuf
     movwf   FSR0L       ;c;
@@ -569,55 +720,117 @@ GSort1
     btfsc   STATUS,C    ;c;
     goto    GSort1      ;   If so, then get a new random number
 
-    movfw   p           ;c;
+    ; Check if this random number already is in the table (dispbuf)
+    movfw   p           ;c; p holds the new random number
     xorwf   dispbuf+0,W
     btfsc   STATUS,Z
-    goto    GSort1
-    movfw   p           ;c;
+    goto    GSort1      ;   Found it in the table, go net a new random number
+    
+    movfw   p           ;c; p holds the new random number
     xorwf   dispbuf+1,W
     btfsc   STATUS,Z
-    goto    GSort1
-    movfw   p           ;c;
+    goto    GSort1      ;   Found it in the table, go net a new random number
+    
+    movfw   p           ;c; p holds the new random number
     xorwf   dispbuf+2,W
     btfsc   STATUS,Z
-    goto    GSort1
-    movfw   p           ;c;
+    goto    GSort1      ;   Found it in the table, go net a new random number
+    
+    movfw   p           ;c; p holds the new random number
     xorwf   dispbuf+3,W
     btfsc   STATUS,Z
-    goto    GSort1
-    movfw   p           ;c;
+    goto    GSort1      ;   Found it in the table, go net a new random number
+    
+    movfw   p           ;c; p holds the new random number
     xorwf   dispbuf+4,W
     btfsc   STATUS,Z
-    goto    GSort1
-    movfw   p           ;c;
+    goto    GSort1      ;   Found it in the table, go net a new random number
+    
+    movfw   p           ;c; p holds the new random number
     xorwf   dispbuf+5,W
     btfsc   STATUS,Z
-    goto    GSort1
-    movfw   p           ;c;
+    goto    GSort1      ;   Found it in the table, go net a new random number
+    
+    movfw   p           ;c; p holds the new random number
     xorwf   dispbuf+6,W
     btfsc   STATUS,Z
-    goto    GSort1
-    movfw   p           ;c;
+    goto    GSort1      ;   Found it in the table, go net a new random number
+
+    movfw   p           ;c; p holds the new random number
     xorwf   dispbuf+7,W
     btfsc   STATUS,Z
-    goto    GSort1
+    goto    GSort1      ;   Found it in the table, go net a new random number
 
-    movfw   p           ;c;
-    movwf   INDF0
+    movfw   p           ;c; We didn't find it, so so store the number 
+    movwf   INDF0       ;c; the number in the table
+    incf    FSR0L       ;c;
+    decfsz  cnt         ;c; Have done them all yet?
+    goto    GSort1      ;   No, go back and do more
+
+    ; All 8 random number (letters) are in place in the dispbuf table
+    ; let the game round begin
+    movlw   8
+    movwf   game        ;c; "game" is used to count the eight correct answers
+GSLoop  
+    call    WaitKeyPress ; Wait for user to selet a character
+    
+    movlw   8           ; Scan thru all 8 entries in table
+    movwf   cnt
+    movlw   LOW(dispbuf); Start at the first dispbuf
+    movwf   FSR0L
+    movfw   INDF0       ; Get the data for #0 and store in "p"
+    movwf   p
+GSTest
+    movfw   p
+    subwf   INDF0,W
+    btfss   STATUS,C
+    goto    smaller
+    movfw   INDF0       ; Found new larges, copy the data
+    movwf   p
+smaller
     incf    FSR0L
-    decfsz  cnt         ;c;
-    goto    GSort1
+    decfsz  cnt
+    goto    GSTest
 
-    call    WaitKeyPress
+; By now we have the lowest data/value in "p"
+
+    movlw   LOW(dispbuf); Get the value the user selected
+    addwf   button,W
+    movwf   FSR0L
+    movfw   INDF0
+    subwf   p,W         ;c; Check if it is the same
+    btfsc   STATUS,Z
+    goto    same
+; Not same, so show minus for a while as punishment
+    movfw   INDF0       ;c; Save the original character in p
+    movwf   p           ;c;
+    movlw   MINUS       ;   Put - in its place
+    movwf   INDF0       ;c;
+    movlw   3000/DELAYFACTOR
+    call    DelayX16
+    movfw   p           ;c; Restore the original character
+    movwf   INDF0       ;c;
+    goto    GSLoop
+
+same
+    movlw   SPACE       ; Clear the character at the place
+    movwf   INDF0       ; 
     call    WaitKeyRelease
-    goto    GameSorts
+
+    decfsz  game        ;c; Have got all eight chars yet? 
+    goto    GSLoop      ;   No, go back and continue this round
+    
+    decfsz  round       ;c; Played all rounds yet?
+    goto    GSRoundLoop ;   No, go back and make&play a new round
+
+    goto    ShowScore   ;   All rounds played, show score and exit
 #endif
 
     
 ;****************************************************************************
-; ToBinary - Shows WREG as abinary number on the display
+; ToBinary - Shows WREG as a binary number on the display
 ;   Input:    WREG
-;   Destroys: tmp, cnt, FSR0
+;   Destroys: tmp, cnt, FSR0x
 ;   Banksel:  1
 ;****************************************************************************
 ToBinary:
@@ -640,58 +853,19 @@ ToBin
     return
 #endif
     
-;****************************************************************************
-; Delay100ms - Delays for 100ms
-;   Input:    
-;   Destroys: dly1,dly2,dly3
-;   Banksel:  2
-;****************************************************************************
-Delay100ms:
-    banksel dly1
-	movlw	0x6C
-	movwf	dly1        ;2;
-	movlw	0xBF
-	movwf	dly2        ;2;
-	movlw	0x02
-	movwf	dly3        ;2;
-Delay100ms_0
-	decfsz	dly1        ;2;
-	goto	$+2
-	decfsz	dly2        ;2;
-	goto	$+2
-	decfsz	dly3        ;2;
-	goto	Delay100ms_0
-    return
-
-;****************************************************************************
-; Delay10ms - Delays for 10ms
-;   Input:    
-;   Destroys: dly1,dly2
-;   Banksel:  2
-;****************************************************************************
-Delay10ms:
-    banksel dly1
-	movlw	0x7E
-	movwf	dly1        ;2;
-	movlw	0x3F
-	movwf	dly2        ;2;
-Delay10ms_0
-	decfsz	dly1        ;2;
-	goto	$+2
-	decfsz	dly2        ;2;
-	goto	Delay10ms_0
-	return
-    
-    
+   
 ;****************************************************************************
 ; ClearDisplay - Sets <space> characters in all displays
+;   Input: <none>   
+;   Destroys: WREG
+;   Banksel:  <none>
 ; ClearDisplayW - Sets the character in WREG in all displays
-;   Input: <none>/WREG   
-;   Destroys: WREG/<none>
+;   Input: WREG   
+;   Destroys: <none>
 ;   Banksel:  <none>
 ;****************************************************************************
 ClearDisplay:
-    movlw   '@'-54
+    movlw   '@'-CHAROFFSET
 ClearDisplayW:
     movwf   dispbuf+0
     movwf   dispbuf+1
@@ -706,7 +880,7 @@ ClearDisplayW:
 ;****************************************************************************
 ; ShowGameName - Shows the name of the game pointed to by <game>
 ;   Input:    game
-;   Destroys: p
+;   Destroys: WREG, p
 ;   Banksel:  <none>
 ;****************************************************************************
 ShowGameName:
@@ -732,12 +906,12 @@ ShowGameName:
 ;****************************************************************************
 ; Random - 16 bit random number generator
 ;   Input: <none>
-;   Destroys: tmp
+;   Destroys: WREG, tmp
 ;   Banksel:  1
 ;****************************************************************************
 Random:
     banksel rndH
-    rrf     rndH,w      ;1; Wreg = Q12
+    rrf     rndH,W      ;1; Wreg = Q12
 	xorwf	rndL,W      ;1; Wreg = xor(Q12,Q3)
 	movwf	tmp         ;1; tmp(bit3) = xor(Q12,Q3)
 	swapf	tmp         ;1; tmp(bit7) = xor(Q12,Q3)
@@ -753,7 +927,7 @@ Random:
 ;****************************************************************************
 ; Bin8toAscii - Convert WREG into 3-digit number at dispbuf[0..2]
 ;   Input: WREG
-;   Destroys: ones,tens
+;   Destroys: WREG, ones,tens
 ;   Banksel:  1
 ;****************************************************************************
 Bin8toAscii:
@@ -795,19 +969,59 @@ CopyDisp3FirstTo3Last:
 #endif
     
 ;****************************************************************************
+; Loop until one of the eight buttons are pressed. Then exit
+; after a short debounceing delay
+;   Input: <none>
+;   Destroys:  <none>
+;   Banksel:  <none>
 ;****************************************************************************
-WaitKeyPress
+WaitKeyPress:
     btfsc   button,7        ;c; Loop until button pressed
     goto    WaitKeyPress
-    goto    Delay10ms       ;   Debounce and return
+    goto    WKDebounce      ;   Debounce and return
 
 ;****************************************************************************
+; Loop until all of the eight buttons are released. Then exit
+; after a short debounceing delay
+;   Input: <none>
+;   Destroys:  <none>
+;   Banksel:  <none>
 ;****************************************************************************
-WaitKeyRelease
-    btfss   button,7        ;c; Loop until button released
+WaitKeyRelease:
+    btfss   button,7        ;c; Loop until buttons released
     goto    WaitKeyRelease
-    goto    Delay10ms       ;   Debounce and return
-    
+; Fall through to the setup of the Debounce delay, then just fall through to
+; the delay function thet will return to the caller for us
+WKDebounce:
+    movlw   2
+
+;****************************************************************************
+; Delay the specified number of 16ms units
+; The slighly strange value of 16 ms is because we can 
+; decrementing this timing variable in the ISR at the same time
+; we're handling the button testing at the end of each full
+; update of the display.
+;   Input: WREG
+;   Destroys: <none>
+;   Banksel:  <none>
+;****************************************************************************
+DelayX16:
+    movwf   decr16ms
+DelayX16Loop
+    TSTF    decr16ms
+    BNZ     DelayX16Loop
+    return
+
+;****************************************************************************
+;   Input: <none<
+;   Destroys: WREG
+;   Banksel:  2
+;****************************************************************************
+ClearSeconds:
+    banksel iSec10
+    movlw   10
+    movwf   iSec10      ;2;
+    clrf    seconds     ;2;
+    return
     
     END
-   
