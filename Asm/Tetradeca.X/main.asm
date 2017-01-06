@@ -14,11 +14,13 @@
 ; Since the PIC16-series have a 14 bit code architecture so the 1024 bytes 
 ; only allows for 1024*8/14=585 "words"
 ;
-; Game ideas:
-;  * CRACK  Four letter word Mastermind
-;  * TONES  Eight-button Simon
-;  * ZEONE  Decimal-to-Binary conversion
-;  * SORTS  Sort-the-letters
+; Games:
+;  * CRACK  Four letter word Mastermind  (dissabled)
+;  * TONES  Eight-button Simon           (enabled)
+;  * ZEONE  Decimal-to-Binary conversion (enabled)
+;  * SORTS  Sort-the-letters             (enabled)
+;
+; The current code size with CRACK disabled is 554 14-bit words = 970 bytes.
 ;
 ; Credits and acknowledgements - I've used code from the sources below. I
 ; didn't find any license information for them, but I boldly assume they are
@@ -217,6 +219,8 @@ GameNames:
     dt 'T'-CHAROFFSET
     dt 'S'-CHAROFFSET 
 #endif
+ 
+    dt  39,39,39,39,39   ; Filler since we don't have four games
 
 ;****************************************************************************
 ; Convert a bit number (0..7) to a mask value
@@ -540,17 +544,63 @@ GTshowLoop
     movlw   HIGH(dispbuf)
     movwf   FSR0H       ;c;
     movfw   cnt
-    addlw   11
+    addlw   1           ; Make tones show as 1..7 (add 11 to get A..H)
     movwf   INDF0
-    movlw   800/DELAYFACTOR ; Delay for 800 ms while showing the current tone
+    movlw   1000/DELAYFACTOR ; Delay for 1000 ms while showing the current tone
     call    DelayX16
     call    ClearDisplay
+    movlw   200/DELAYFACTOR ; Delay for 200 ms while showing the current tone
+    call    DelayX16
     incf    p
     movfw   p
     subwf   round,W
     btfss   STATUS, Z
     goto    GTshowLoop
-    movwf   4000/DELAYFACTOR  ; At end of sequence delay for 4 seconds
+; All of the current sequence so far is shown, now let the user repeat it
+    clrf    p           ;c; Position in array to show
+GTcopyloop
+    call    ClearDisplay
+    call    WaitKeyPress; Wait for button press
+
+    movlw   HIGH(dispbuf);  Show what the player is pressing
+    movwf   FSR0H       ;c;
+    movfw   button
+    addlw   LOW(dispbuf)
+    movwf   FSR0L       ;c;
+    movfw   button
+    addlw   1
+    movwf   INDF0
+    
+    movlw   HIGH(guesses)
+    movwf   FSR0H       ;c;
+    movlw   LOW(guesses);   Point Index to array of tones
+    addwf   p,W
+    movwf   FSR0L       ;c;
+    movfw   INDF0       ;  Get  tones[p]
+
+    subwf   button,W    ; Correct button/tone?
+    btfsc   STATUS,Z
+    goto    GTcorrect
+    call    PlayFail
+    movfw   round       ;c; Copy the rounds number -1 as the score
+    banksel seconds
+    movwf   seconds     ;2; seconds/score
+    decf    seconds
+    goto    ShowScore   ;   Show score and go back to main menu
+    
+    
+GTcorrect
+    call    WaitKeyRelease
+
+    incf    p
+    movfw   p
+    subwf   round,W
+    btfss   STATUS, Z
+    goto    GTcopyloop
+    call    PlayCorrect
+
+    movlw   3000/DELAYFACTOR  ; At end of sequence delay for 3 seconds
+    call    DelayX16
     incf    round
     goto    GTshowSequence
 #endif
